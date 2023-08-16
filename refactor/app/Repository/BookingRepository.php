@@ -62,7 +62,9 @@ class BookingRepository extends BaseRepository
         $emergencyJobs = array();
         $noramlJobs = array();
         if ($cuser && $cuser->is('customer')) {
-            $jobs = $cuser->jobs()->with('user.userMeta', 'user.average', 'translatorJobRel.user.average', 'language', 'feedback')->whereIn('status', ['pending', 'assigned', 'started'])->orderBy('due', 'asc')->get();
+            $conditions['status'] = ['pending', 'assigned', 'started'];
+            $conditions['order'] =  'asc';
+            $jobs = $this->getCustomerJobs($cuser,$conditions);
             $usertype = 'customer';
         } elseif ($cuser && $cuser->is('translator')) {
             $jobs = Job::getTranslatorJobs($cuser->id, 'new');
@@ -99,24 +101,22 @@ class BookingRepository extends BaseRepository
         }
         $cuser = User::find($user_id);
         $usertype = '';
-        $emergencyJobs = array();
-        $noramlJobs = array();
+        
         if ($cuser && $cuser->is('customer')) {
-            $jobs = $cuser->jobs()->with('user.userMeta', 'user.average', 'translatorJobRel.user.average', 'language', 'feedback', 'distance')->whereIn('status', ['completed', 'withdrawbefore24', 'withdrawafter24', 'timedout'])->orderBy('due', 'desc')->paginate(15);
+            $conditions['status'] = ['completed', 'withdrawbefore24', 'withdrawafter24', 'timedout'];
+            $conditions['order'] =  'desc';
+            $conditions['pageLimit'] = 15;
+            $jobs = $this->getCustomerJobs($cuser,$conditions);
             $usertype = 'customer';
-            return ['emergencyJobs' => $emergencyJobs, 'noramlJobs' => [], 'jobs' => $jobs, 'cuser' => $cuser, 'usertype' => $usertype, 'numpages' => 0, 'pagenum' => 0];
+            return ['emergencyJobs' => [], 'noramlJobs' => [], 'jobs' => $jobs, 'cuser' => $cuser, 'usertype' => $usertype, 'numpages' => 0, 'pagenum' => 0];
         } elseif ($cuser && $cuser->is('translator')) {
             $jobs_ids = Job::getTranslatorJobsHistoric($cuser->id, 'historic', $pagenum);
             $totaljobs = $jobs_ids->total();
             $numpages = ceil($totaljobs / 15);
-
             $usertype = 'translator';
-
             $jobs = $jobs_ids;
             $noramlJobs = $jobs_ids;
-//            $jobs['data'] = $noramlJobs;
-//            $jobs['total'] = $totaljobs;
-            return ['emergencyJobs' => $emergencyJobs, 'noramlJobs' => $noramlJobs, 'jobs' => $jobs, 'cuser' => $cuser, 'usertype' => $usertype, 'numpages' => $numpages, 'pagenum' => $pagenum];
+            return ['emergencyJobs' => [], 'noramlJobs' => [], 'jobs' => $jobs, 'cuser' => $cuser, 'usertype' => $usertype, 'numpages' => $numpages, 'pagenum' => $pagenum];
         }
     }
 
@@ -132,42 +132,32 @@ class BookingRepository extends BaseRepository
         $consumer_type = $user->userMeta->consumer_type;
         if ($user->user_type == env('CUSTOMER_ROLE_ID')) {
             $cuser = $user;
-
+            //default response setting to avoid repeating same code
+            $response['status'] = 'fail';
+            $response['message'] = "Du måste fylla in alla fält";
             if (!isset($data['from_language_id'])) {
-                $response['status'] = 'fail';
-                $response['message'] = "Du måste fylla in alla fält";
                 $response['field_name'] = "from_language_id";
                 return $response;
             }
             if ($data['immediate'] == 'no') {
                 if (isset($data['due_date']) && $data['due_date'] == '') {
-                    $response['status'] = 'fail';
-                    $response['message'] = "Du måste fylla in alla fält";
                     $response['field_name'] = "due_date";
                     return $response;
                 }
                 if (isset($data['due_time']) && $data['due_time'] == '') {
-                    $response['status'] = 'fail';
-                    $response['message'] = "Du måste fylla in alla fält";
                     $response['field_name'] = "due_time";
                     return $response;
                 }
                 if (!isset($data['customer_phone_type']) && !isset($data['customer_physical_type'])) {
-                    $response['status'] = 'fail';
-                    $response['message'] = "Du måste göra ett val här";
                     $response['field_name'] = "customer_phone_type";
                     return $response;
                 }
                 if (isset($data['duration']) && $data['duration'] == '') {
-                    $response['status'] = 'fail';
-                    $response['message'] = "Du måste fylla in alla fält";
                     $response['field_name'] = "duration";
                     return $response;
                 }
             } else {
                 if (isset($data['duration']) && $data['duration'] == '') {
-                    $response['status'] = 'fail';
-                    $response['message'] = "Du måste fylla in alla fält";
                     $response['field_name'] = "duration";
                     return $response;
                 }
@@ -263,13 +253,8 @@ class BookingRepository extends BaseRepository
                     $data['job_for'][] = $job->certified;
                 }
             }
-
             $data['customer_town'] = $cuser->userMeta->city;
             $data['customer_type'] = $cuser->userMeta->customer_type;
-
-            //Event::fire(new JobWasCreated($job, $data, '*'));
-
-//            $this->sendNotificationToSuitableTranslators($job->id, $data, '*');// send Push for New job posting
         } else {
             $response['status'] = 'fail';
             $response['message'] = "Translator can not create booking";
@@ -280,36 +265,21 @@ class BookingRepository extends BaseRepository
     }
 
     /**
+     *  This function only saves job email , All other information will be stored from other function
      * @param $data
      * @return mixed
      */
     public function storeJobEmail($data)
     {
         $user_type = $data['user_type'];
-        $job = Job::findOrFail(@$data['user_email_job_id']);
-        $job->user_email = @$data['user_email'];
-        $job->reference = isset($data['reference']) ? $data['reference'] : '';
+        $job = Job::findOrFail($data['user_email_job_id']);
+        $job->user_email = $data['user_email'];
         $user = $job->user()->get()->first();
-        if (isset($data['address'])) {
-            $job->address = ($data['address'] != '') ? $data['address'] : $user->userMeta->address;
-            $job->instructions = ($data['instructions'] != '') ? $data['instructions'] : $user->userMeta->instructions;
-            $job->town = ($data['town'] != '') ? $data['town'] : $user->userMeta->city;
-        }
         $job->save();
 
-        if (!empty($job->user_email)) {
-            $email = $job->user_email;
-            $name = $user->name;
-        } else {
-            $email = $user->email;
-            $name = $user->name;
-        }
         $subject = 'Vi har mottagit er tolkbokning. Bokningsnr: #' . $job->id;
-        $send_data = [
-            'user' => $user,
-            'job'  => $job
-        ];
-        $this->mailer->send($email, $name, $subject, 'emails.job-created', $send_data);
+        $customMsg = 'emails.job-created';
+        $this->sendEmail($user, $job, $subject, $customMsg, null);
 
         $response['type'] = $user_type;
         $response['job'] = $job;
@@ -395,12 +365,7 @@ class BookingRepository extends BaseRepository
         $job->session_time = $interval;
 
         $user = $job->user()->get()->first();
-        if (!empty($job->user_email)) {
-            $email = $job->user_email;
-        } else {
-            $email = $user->email;
-        }
-        $name = $user->name;
+        
         $subject = 'Information om avslutad tolkning för bokningsnummer # ' . $job->id;
         $session_explode = explode(':', $job->session_time);
         $session_time = $session_explode[0] . ' tim ' . $session_explode[1] . ' min';
@@ -410,8 +375,8 @@ class BookingRepository extends BaseRepository
             'session_time' => $session_time,
             'for_text'     => 'faktura'
         ];
-        $mailer = new AppMailer();
-        $mailer->send($email, $name, $subject, 'emails.session-ended', $data);
+        $customMsg = 'emails.session-ended';
+        $this->sendEmail($user, $job, $subject, $customMsg, $data);
 
         $job->save();
 
@@ -420,8 +385,6 @@ class BookingRepository extends BaseRepository
         Event::fire(new SessionEnded($job, ($post_data['userid'] == $job->user_id) ? $tr->user_id : $job->user_id));
 
         $user = $tr->user()->first();
-        $email = $user->email;
-        $name = $user->name;
         $subject = 'Information om avslutad tolkning för bokningsnummer # ' . $job->id;
         $data = [
             'user'         => $user,
@@ -429,8 +392,7 @@ class BookingRepository extends BaseRepository
             'session_time' => $session_time,
             'for_text'     => 'lön'
         ];
-        $mailer = new AppMailer();
-        $mailer->send($email, $name, $subject, 'emails.session-ended', $data);
+        $this->sendEmail($user, $job, $subject, $customMsg, $data);
 
         $tr->completed_at = $completeddate;
         $tr->completed_by = $post_data['userid'];
@@ -802,23 +764,17 @@ class BookingRepository extends BaseRepository
         $old_status = $job->status;
         $statusChanged = false;
         if ($old_status != $data['status']) {
-            switch ($job->status) {
-                case 'timedout':
+            switch (true) {
+                case ($job->status == 'timedout'):
                     $statusChanged = $this->changeTimedoutStatus($job, $data, $changedTranslator);
                     break;
-                case 'completed':
-                    $statusChanged = $this->changeCompletedStatus($job, $data);
+                case ($job->status == 'started' || $job->status == "completed" || $job->status == "withdrawafter24"):
+                    $statusChanged = $this->changeStartedCompletedWithdrawStatus($job, $data);
                     break;
-                case 'started':
-                    $statusChanged = $this->changeStartedStatus($job, $data);
-                    break;
-                case 'pending':
+                case ($job->status == 'pending'):
                     $statusChanged = $this->changePendingStatus($job, $data, $changedTranslator);
                     break;
-                case 'withdrawafter24':
-                    $statusChanged = $this->changeWithdrawafter24Status($job, $data);
-                    break;
-                case 'assigned':
+                case ($job->status == 'assigned'):
                     $statusChanged = $this->changeAssignedStatus($job, $data);
                     break;
                 default:
@@ -845,20 +801,10 @@ class BookingRepository extends BaseRepository
      */
     private function changeTimedoutStatus($job, $data, $changedTranslator)
     {
-//        if (in_array($data['status'], ['pending', 'assigned']) && date('Y-m-d H:i:s') <= $job->due) {
         $old_status = $job->status;
         $job->status = $data['status'];
         $user = $job->user()->first();
-        if (!empty($job->user_email)) {
-            $email = $job->user_email;
-        } else {
-            $email = $user->email;
-        }
-        $name = $user->name;
-        $dataEmail = [
-            'user' => $user,
-            'job'  => $job
-        ];
+        
         if ($data['status'] == 'pending') {
             $job->created_at = date('Y-m-d H:i:s');
             $job->emailsent = 0;
@@ -867,49 +813,31 @@ class BookingRepository extends BaseRepository
             $job_data = $this->jobToData($job);
 
             $subject = 'Vi har nu återöppnat er bokning av ' . TeHelper::fetchLanguageFromJobId($job->from_language_id) . 'tolk för bokning #' . $job->id;
-            $this->mailer->send($email, $name, $subject, 'emails.job-change-status-to-customer', $dataEmail);
-
+            $customMsg = 'emails.job-change-status-to-customer';
+            $this->sendEmail($user, $job, $subject, $customMsg, null);
             $this->sendNotificationTranslator($job, $job_data, '*');   // send Push all sutiable translators
 
             return true;
         } elseif ($changedTranslator) {
             $job->save();
             $subject = 'Bekräftelse - tolk har accepterat er bokning (bokning # ' . $job->id . ')';
-            $this->mailer->send($email, $name, $subject, 'emails.job-accepted', $dataEmail);
+            $customMsg = 'emails.job-accepted';
+            $this->sendEmail($user, $job, $subject, $customMsg, null);
             return true;
         }
-
-//        }
         return false;
     }
 
+    
+
     /**
+     * This function chages the status of started, completed and withdraw after 24 status types   
      * @param $job
      * @param $data
      * @return bool
      */
-    private function changeCompletedStatus($job, $data)
+    private function changeStartedCompletedWithdrawStatus($job, $data)
     {
-//        if (in_array($data['status'], ['withdrawnbefore24', 'withdrawafter24', 'timedout'])) {
-        $job->status = $data['status'];
-        if ($data['status'] == 'timedout') {
-            if ($data['admin_comments'] == '') return false;
-            $job->admin_comments = $data['admin_comments'];
-        }
-        $job->save();
-        return true;
-//        }
-        return false;
-    }
-
-    /**
-     * @param $job
-     * @param $data
-     * @return bool
-     */
-    private function changeStartedStatus($job, $data)
-    {
-//        if (in_array($data['status'], ['withdrawnbefore24', 'withdrawafter24', 'timedout', 'completed'])) {
         $job->status = $data['status'];
         if ($data['admin_comments'] == '') return false;
         $job->admin_comments = $data['admin_comments'];
@@ -921,26 +849,18 @@ class BookingRepository extends BaseRepository
             $job->end_at = date('Y-m-d H:i:s');
             $job->session_time = $interval;
             $session_time = $diff[0] . ' tim ' . $diff[1] . ' min';
-            if (!empty($job->user_email)) {
-                $email = $job->user_email;
-            } else {
-                $email = $user->email;
-            }
-            $name = $user->name;
-            $dataEmail = [
+            $extraData = [
                 'user'         => $user,
                 'job'          => $job,
                 'session_time' => $session_time,
                 'for_text'     => 'faktura'
             ];
-
             $subject = 'Information om avslutad tolkning för bokningsnummer #' . $job->id;
-            $this->mailer->send($email, $name, $subject, 'emails.session-ended', $dataEmail);
+            $customMsg = 'emails.session-ended';
+            $this->sendEmail($user, $job, $subject, $customMsg, $extraData);
 
             $user = $job->translatorJobRel->where('completed_at', Null)->where('cancel_at', Null)->first();
 
-            $email = $user->user->email;
-            $name = $user->user->name;
             $subject = 'Information om avslutad tolkning för bokningsnummer # ' . $job->id;
             $dataEmail = [
                 'user'         => $user,
@@ -948,13 +868,15 @@ class BookingRepository extends BaseRepository
                 'session_time' => $session_time,
                 'for_text'     => 'lön'
             ];
-            $this->mailer->send($email, $name, $subject, 'emails.session-ended', $dataEmail);
+            $this->sendEmail($user, $job, $subject, $customMsg, $extraData);
 
         }
+        if ($job->status=='withdrawafter24' && !(in_array($data['status'], ['timedout']))) {
+            return false;
+        }
+        
         $job->save();
         return true;
-//        }
-        return false;
     }
 
     /**
@@ -965,21 +887,11 @@ class BookingRepository extends BaseRepository
      */
     private function changePendingStatus($job, $data, $changedTranslator)
     {
-//        if (in_array($data['status'], ['withdrawnbefore24', 'withdrawafter24', 'timedout', 'assigned'])) {
         $job->status = $data['status'];
         if ($data['admin_comments'] == '' && $data['status'] == 'timedout') return false;
         $job->admin_comments = $data['admin_comments'];
         $user = $job->user()->first();
-        if (!empty($job->user_email)) {
-            $email = $job->user_email;
-        } else {
-            $email = $user->email;
-        }
-        $name = $user->name;
-        $dataEmail = [
-            'user' => $user,
-            'job'  => $job
-        ];
+        
 
         if ($data['status'] == 'assigned' && $changedTranslator) {
 
@@ -987,7 +899,9 @@ class BookingRepository extends BaseRepository
             $job_data = $this->jobToData($job);
 
             $subject = 'Bekräftelse - tolk har accepterat er bokning (bokning # ' . $job->id . ')';
-            $this->mailer->send($email, $name, $subject, 'emails.job-accepted', $dataEmail);
+            $customMsg = 'emails.job-accepted';
+            $this->sendEmail($user, $job, $subject, $customMsg, null);
+
 
             $translator = Job::getJobsAssignedTranslatorDetail($job);
             $this->mailer->send($translator->email, $translator->name, $subject, 'emails.job-changed-translator-new-translator', $dataEmail);
@@ -999,13 +913,11 @@ class BookingRepository extends BaseRepository
             return true;
         } else {
             $subject = 'Avbokning av bokningsnr: #' . $job->id;
-            $this->mailer->send($email, $name, $subject, 'emails.status-changed-from-pending-or-assigned-customer', $dataEmail);
+            $customMsg ='emails.status-changed-from-pending-or-assigned-customer';
+            $this->sendEmail($user, $job, $subject, $customMsg, null);
             $job->save();
             return true;
         }
-
-
-//        }
         return false;
     }
 
@@ -1043,23 +955,6 @@ class BookingRepository extends BaseRepository
      * @param $data
      * @return bool
      */
-    private function changeWithdrawafter24Status($job, $data)
-    {
-        if (in_array($data['status'], ['timedout'])) {
-            $job->status = $data['status'];
-            if ($data['admin_comments'] == '') return false;
-            $job->admin_comments = $data['admin_comments'];
-            $job->save();
-            return true;
-        }
-        return false;
-    }
-
-    /**
-     * @param $job
-     * @param $data
-     * @return bool
-     */
     private function changeAssignedStatus($job, $data)
     {
         if (in_array($data['status'], ['withdrawbefore24', 'withdrawafter24', 'timedout'])) {
@@ -1068,31 +963,16 @@ class BookingRepository extends BaseRepository
             $job->admin_comments = $data['admin_comments'];
             if (in_array($data['status'], ['withdrawbefore24', 'withdrawafter24'])) {
                 $user = $job->user()->first();
-
-                if (!empty($job->user_email)) {
-                    $email = $job->user_email;
-                } else {
-                    $email = $user->email;
-                }
-                $name = $user->name;
-                $dataEmail = [
-                    'user' => $user,
-                    'job'  => $job
-                ];
-
                 $subject = 'Information om avslutad tolkning för bokningsnummer #' . $job->id;
-                $this->mailer->send($email, $name, $subject, 'emails.status-changed-from-pending-or-assigned-customer', $dataEmail);
-
+                $customMsg = 'emails.status-changed-from-pending-or-assigned-customer';
+                $this->sendEmail($user, $job, $subject, $customMsg, null);
                 $user = $job->translatorJobRel->where('completed_at', Null)->where('cancel_at', Null)->first();
 
-                $email = $user->user->email;
-                $name = $user->user->name;
+                
                 $subject = 'Information om avslutad tolkning för bokningsnummer # ' . $job->id;
-                $dataEmail = [
-                    'user' => $user,
-                    'job'  => $job
-                ];
-                $this->mailer->send($email, $name, $subject, 'emails.job-cancel-translator', $dataEmail);
+                $customMsg = 'emails.job-cancel-translator';
+                $this->sendEmail($user, $job, $subject, $customMsg, null);
+                
             }
             $job->save();
             return true;
@@ -1171,33 +1051,20 @@ class BookingRepository extends BaseRepository
     public function sendChangedTranslatorNotification($job, $current_translator, $new_translator)
     {
         $user = $job->user()->first();
-        if (!empty($job->user_email)) {
-            $email = $job->user_email;
-        } else {
-            $email = $user->email;
-        }
-        $name = $user->name;
         $subject = 'Meddelande om tilldelning av tolkuppdrag för uppdrag # ' . $job->id . ')';
-        $data = [
-            'user' => $user,
-            'job'  => $job
-        ];
-        $this->mailer->send($email, $name, $subject, 'emails.job-changed-translator-customer', $data);
+        $customMsg = 'emails.job-changed-translator-customer';
+        $this->sendEmail($user, $job, $subject, $customMsg, null);
         if ($current_translator) {
             $user = $current_translator->user;
-            $name = $user->name;
-            $email = $user->email;
             $data['user'] = $user;
-
-            $this->mailer->send($email, $name, $subject, 'emails.job-changed-translator-old-translator', $data);
+            $customMsg = 'emails.job-changed-translator-old-translator';
+            $this->sendEmail($user, $job, $subject, $customMsg, $data);
         }
 
         $user = $new_translator->user;
-        $name = $user->name;
-        $email = $user->email;
         $data['user'] = $user;
-
-        $this->mailer->send($email, $name, $subject, 'emails.job-changed-translator-new-translator', $data);
+        $customMsg = 'emails.job-changed-translator-new-translator';
+        $this->sendEmail($user, $job, $subject, $customMsg, $data);
 
     }
 
@@ -1208,19 +1075,16 @@ class BookingRepository extends BaseRepository
     public function sendChangedDateNotification($job, $old_time)
     {
         $user = $job->user()->first();
-        if (!empty($job->user_email)) {
-            $email = $job->user_email;
-        } else {
-            $email = $user->email;
-        }
-        $name = $user->name;
+        
         $subject = 'Meddelande om ändring av tolkbokning för uppdrag # ' . $job->id . '';
         $data = [
             'user'     => $user,
             'job'      => $job,
             'old_time' => $old_time
         ];
-        $this->mailer->send($email, $name, $subject, 'emails.job-changed-date', $data);
+        $customMsg = 'emails.job-changed-date';
+        $this->sendEmail($user, $job, $subject, $customMsg, $data);
+        
 
         $translator = Job::getJobsAssignedTranslatorDetail($job);
         $data = [
@@ -1228,8 +1092,7 @@ class BookingRepository extends BaseRepository
             'job'      => $job,
             'old_time' => $old_time
         ];
-        $this->mailer->send($translator->email, $translator->name, $subject, 'emails.job-changed-date', $data);
-
+        $this->sendEmail($user, $job, $subject, $customMsg, $data);
     }
 
     /**
@@ -1239,11 +1102,7 @@ class BookingRepository extends BaseRepository
     public function sendChangedLangNotification($job, $old_lang)
     {
         $user = $job->user()->first();
-        if (!empty($job->user_email)) {
-            $email = $job->user_email;
-        } else {
-            $email = $user->email;
-        }
+        
         $name = $user->name;
         $subject = 'Meddelande om ändring av tolkbokning för uppdrag # ' . $job->id . '';
         $data = [
@@ -1251,7 +1110,9 @@ class BookingRepository extends BaseRepository
             'job'      => $job,
             'old_lang' => $old_lang
         ];
-        $this->mailer->send($email, $name, $subject, 'emails.job-changed-lang', $data);
+        $customMsg = 'emails.job-changed-lang';
+        $this->sendEmail($user, $job, $subject, $customMsg, $data);
+        
         $translator = Job::getJobsAssignedTranslatorDetail($job);
         $this->mailer->send($translator->email, $translator->name, $subject, 'emails.job-changed-date', $data);
     }
@@ -1391,23 +1252,10 @@ class BookingRepository extends BaseRepository
                 $job->status = 'assigned';
                 $job->save();
                 $user = $job->user()->get()->first();
-                $mailer = new AppMailer();
-
-                if (!empty($job->user_email)) {
-                    $email = $job->user_email;
-                    $name = $user->name;
-                    $subject = 'Bekräftelse - tolk har accepterat er bokning (bokning # ' . $job->id . ')';
-                } else {
-                    $email = $user->email;
-                    $name = $user->name;
-                    $subject = 'Bekräftelse - tolk har accepterat er bokning (bokning # ' . $job->id . ')';
-                }
-                $data = [
-                    'user' => $user,
-                    'job'  => $job
-                ];
-                $mailer->send($email, $name, $subject, 'emails.job-accepted', $data);
-
+                
+                $subject = 'Bekräftelse - tolk har accepterat er bokning (bokning # ' . $job->id . ')';
+                $customMsg = 'emails.job-accepted';
+                $this->sendEmail($user, $job, $subject, $customMsg, null);
             }
             /*@todo
                 add flash message here.
@@ -1438,22 +1286,11 @@ class BookingRepository extends BaseRepository
                 $job->status = 'assigned';
                 $job->save();
                 $user = $job->user()->get()->first();
-                $mailer = new AppMailer();
-
-                if (!empty($job->user_email)) {
-                    $email = $job->user_email;
-                    $name = $user->name;
-                } else {
-                    $email = $user->email;
-                    $name = $user->name;
-                }
+                
                 $subject = 'Bekräftelse - tolk har accepterat er bokning (bokning # ' . $job->id . ')';
-                $data = [
-                    'user' => $user,
-                    'job'  => $job
-                ];
-                $mailer->send($email, $name, $subject, 'emails.job-accepted', $data);
-
+                $customMsg = 'emails.job-accepted';
+                $this->sendEmail($user, $job, $subject, $customMsg, null);
+                
                 $data = array();
                 $data['notification_type'] = 'job_accepted';
                 $language = TeHelper::fetchLanguageFromJobId($job->from_language_id);
@@ -1612,12 +1449,7 @@ class BookingRepository extends BaseRepository
         $job->session_time = $interval;
 
         $user = $job->user()->get()->first();
-        if (!empty($job->user_email)) {
-            $email = $job->user_email;
-        } else {
-            $email = $user->email;
-        }
-        $name = $user->name;
+        
         $subject = 'Information om avslutad tolkning för bokningsnummer # ' . $job->id;
         $session_explode = explode(':', $job->session_time);
         $session_time = $session_explode[0] . ' tim ' . $session_explode[1] . ' min';
@@ -1627,9 +1459,9 @@ class BookingRepository extends BaseRepository
             'session_time' => $session_time,
             'for_text'     => 'faktura'
         ];
-        $mailer = new AppMailer();
-        $mailer->send($email, $name, $subject, 'emails.session-ended', $data);
-
+        $customMsg = 'emails.session-ended';
+        $this->sendEmail($user, $job, $subject, $customMsg, $data);
+        
         $job->save();
 
         $tr = $job->translatorJobRel()->where('completed_at', Null)->where('cancel_at', Null)->first();
@@ -1637,8 +1469,7 @@ class BookingRepository extends BaseRepository
         Event::fire(new SessionEnded($job, ($post_data['user_id'] == $job->user_id) ? $tr->user_id : $job->user_id));
 
         $user = $tr->user()->first();
-        $email = $user->email;
-        $name = $user->name;
+        
         $subject = 'Information om avslutad tolkning för bokningsnummer # ' . $job->id;
         $data = [
             'user'         => $user,
@@ -1646,9 +1477,9 @@ class BookingRepository extends BaseRepository
             'session_time' => $session_time,
             'for_text'     => 'lön'
         ];
-        $mailer = new AppMailer();
-        $mailer->send($email, $name, $subject, 'emails.session-ended', $data);
-
+        $customMsg = 'emails.session-ended';
+        $this->sendEmail($user, $job, $subject, $customMsg, null);
+        
         $tr->completed_at = $completeddate;
         $tr->completed_by = $post_data['user_id'];
         $tr->save();
@@ -2179,6 +2010,46 @@ class BookingRepository extends BaseRepository
         $minutes = ($time % 60);
         
         return sprintf($format, $hours, $minutes);
+    }
+
+    public function getCustomerJobs($user, $conditions){
+        $jobs = $cuser->jobs()->with('user.userMeta', 'user.average', 'translatorJobRel.user.average', 'language', 'feedback');
+        if(isset()){
+            $jobs = $jobs->whereIn('status', $conditions['status']);
+        }
+        if(isset($conditions['order'])){
+            $jobs = $jobs->orderBy('due', $conditions['order']);
+        }
+
+        if(isset($conditions['pageLimit'])){
+            $jobs = $jobs->paginate(15);
+        }
+        else{
+            $jobs = $jobs->get();   
+        }
+        
+        return $jobs;   
+    }
+
+    public function sendEmail($user, $job,$subject,$customMsg,$extraData=null){
+        if (!empty($job->user_email)) {
+            $email = $job->user_email;
+            $name = $user->name;
+        } else {
+            $email = $user->email;
+            $name = $user->name;
+        }
+        if($extraData){
+            $send_data =  $extraData;   
+        }
+        else{
+            $send_data = [
+                'user' => $user,
+                'job'  => $job
+            ];    
+        }
+        
+        $this->mailer->send($email, $name, $subject, $customMsg, $send_data);   
     }
 
 }

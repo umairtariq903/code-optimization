@@ -208,7 +208,15 @@ class UserRepository extends BaseRepository
                 $this->disable($model->id);
             }
         }
-        return $model ? $model : false;
+        if($model){
+            $response['created'] = true;
+            $response['message'] = 'user created succefully';
+        }
+        else{
+            $response['created'] = false;
+            $response['message'] = 'user not created succefully';
+        }
+        return $response;
     }
 
     public function enable($id)
@@ -216,6 +224,7 @@ class UserRepository extends BaseRepository
         $user = User::findOrFail($id);
         $user->status = '1';
         $user->save();
+        return true;
 
     }
 
